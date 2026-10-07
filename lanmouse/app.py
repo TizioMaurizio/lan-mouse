@@ -1,6 +1,5 @@
 """The same GUI on both PCs: choose a computer, approve once, then share."""
 
-import base64
 import os
 import queue
 import sys
@@ -28,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .clipboard import Clipboard
-from .core import PORT, Clock, ProtocolError, decode_clipboard, validate_input
+from .core import PORT, Clock, ProtocolError, decode_clipboard, integer, validate_input
 from .edges import Edges
 from .identity import Identity
 from .network import Network, local_addresses
@@ -98,7 +97,8 @@ class Window(QMainWindow):
         )
         self._configure_edges()
         self.timer = QTimer(self)
-        self.timer.setInterval(10)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.timer.setInterval(2)
         self.timer.timeout.connect(self._drain)
         self.timer.start()
         self._tray()
@@ -346,8 +346,13 @@ class Window(QMainWindow):
             owner = message.get("owner")
             if owner not in (None, self.session.peer_id, self.identity.id):
                 raise ProtocolError("Invalid control owner")
+            crossing = message.get("edge")
+            if crossing is not None:
+                if not isinstance(crossing, dict):
+                    raise ProtocolError("Invalid screen crossing")
+                integer(crossing.get("y"), 0, 65535)
             if self.control.accept(message.get("stamp"), self.session.peer_id):
-                self._set_owner(owner)
+                self._set_owner(owner, crossing)
         elif kind == "input":
             event = validate_input(message)
             if self.owner == self.session.peer_id and message.get("stamp") == list(
@@ -362,10 +367,16 @@ class Window(QMainWindow):
         else:
             raise ProtocolError("Unknown message type")
 
-    def toggle(self):
+    def toggle(self, crossing=None):
+        if not isinstance(crossing, dict):
+            crossing = None  # QPushButton.clicked supplies a bool.
         if not self.session or self.session.closed.is_set():
             return
-        if time.monotonic() - self.last_switch < 0.25 and self.owner != self.identity.id:
+        if (
+            crossing is None
+            and time.monotonic() - self.last_switch < 0.25
+            and self.owner != self.identity.id
+        ):
             return
         self.last_switch = time.monotonic()
         # Either side can return to local control. From local mode, use this PC's devices.
@@ -373,15 +384,18 @@ class Window(QMainWindow):
         if owner and not self.backend.ready:
             self._status("Input is unavailable. Complete Linux setup and restart the app.")
             return
-        self.session.send({"type": "control", "owner": owner, "stamp": self.control.tick()})
+        control = {"type": "control", "owner": owner, "stamp": self.control.tick()}
+        if crossing is not None:
+            control["edge"] = crossing
+        self.session.send(control)
         try:
-            self._set_owner(owner)
+            self._set_owner(owner, crossing)
         except (OSError, RuntimeError) as exc:
             self.session.send({"type": "control", "owner": None, "stamp": self.control.tick()})
             self._set_owner(None)
             self._status(str(exc))
 
-    def _set_owner(self, owner):
+    def _set_owner(self, owner, crossing=None):
         self.backend.set_active(False)
         self.backend.release_all()
         self.backend.receiving = owner is not None and owner != self.identity.id
@@ -397,6 +411,9 @@ class Window(QMainWindow):
             self.state_label.setText(f"Connected to {self.session.name} · Local control")
             self.switch_button.setText("Control the other computer · F8")
         self.edges.cooldown()
+        self.edges.sending = owner == self.identity.id
+        if crossing is not None and owner != self.identity.id:
+            self.edges.enter(crossing, self.backend)
 
     def _input_error(self, text):
         if self.session and self.owner is not None:
@@ -407,7 +424,7 @@ class Window(QMainWindow):
 
     def _edge_hit(self):
         if self.owner != self.identity.id:
-            self.toggle()
+            self.toggle(self.edges.crossing())
 
     def _configure_edges(self, *_):
         if not hasattr(self, "edges"):
@@ -424,7 +441,7 @@ class Window(QMainWindow):
                 {
                     "type": "clipboard",
                     "mime": mime,
-                    "data": base64.b64encode(raw).decode(),
+                    "data": raw,
                     "stamp": self.clip_clock.tick(),
                 }
             )

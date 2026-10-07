@@ -6,7 +6,7 @@ Qt: PySide6 6.11.2.
 
 Verified locally:
 
-- **47 tests passed**, with the Windows-only backend module skipped on Linux.
+- **74 tests passed**, with the Windows-only backend module skipped on Linux.
 - Automated Python test suite on Linux, including live loopback TLS connections.
 - GUI starts and renders. Missing `/dev/uinput` permissions produce a setup
   message and leave physical input untouched.
@@ -22,6 +22,18 @@ Verified locally:
 - Native Linux input initialization succeeded using the laptop's Python 3.14.3:
   uinput keyboard/mouse devices opened and three physical input devices were
   accessible. No physical input was grabbed during this initialization check.
+- KDE cursor position notifications reach the D-Bus adapter on the actual laptop.
+  A virtual absolute pointer moved to the requested position across the complete
+  3840 × 1080 desktop, then restored the original pointer position.
+- Large PNG images retain their pixels through chunked loopback TLS transfers.
+  A paced socket test verifies that keyboard input arrives between chunks of
+  a multi-megabyte clipboard item, ahead of the remaining clipboard data.
+- Movement coalescing preserves displacement, button/key ordering and control
+  stamps. Both TLS peers enable TCP_NODELAY.
+- Mixed browser image/URL clipboard offers and Wayland image conversion;
+  background Qt image compression; stale and duplicate clipboard notifications.
+- Immediate edge crossing/rearming, height-preserving entry, suppression of
+  stale border reports, and rapid reverse handoffs are covered by isolated tests.
 
 Not yet verified:
 
@@ -40,8 +52,11 @@ Not yet verified:
 4. Press F8 to return. Repeat using the Windows devices to control Linux.
 5. Test the joining screen edge in both directions. F8 should always return
    control immediately when the originating mouse/keyboard is being shared.
-6. Copy Unicode text in each direction, then copy an image in each direction.
-   Confirm the clipboard does not keep replacing a new local copy.
+6. Copy Unicode text, a screenshot, and a browser image in each direction.
+   Paste into an image editor or chat app. Move/type on the other PC while copying
+   a large image. Confirm a newer local copy is not replaced by a pending image.
+   Cross the joining edge repeatedly in both directions, including fast reversals,
+   and confirm entry height is preserved without getting stuck at the border.
 7. While controlling the remote PC, stop the receiver app or disconnect Wi-Fi.
    Confirm local input returns within about eight seconds. Pressing F8 should
    return sooner. Restart/reconnect and confirm no approval prompt repeats.

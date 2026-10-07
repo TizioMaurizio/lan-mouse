@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from lanmouse.core import ProtocolError, encode
+from lanmouse.core import ProtocolError, decode_clipboard, encode
 from lanmouse.identity import Identity, fingerprint, verify_proof
 from lanmouse.network import Network, Session, lan_address
 
@@ -78,7 +78,7 @@ def test_mutual_pairing_encrypted_input_and_clipboard(peers):
     assert b.messages.get(timeout=3) == message
     clipboard = {"type": "clipboard", "mime": "text/plain;charset=utf-8", "data": "aGVsbG8="}
     assert server.send(clipboard)
-    assert a.messages.get(timeout=3) == clipboard
+    assert decode_clipboard(a.messages.get(timeout=3)) == (clipboard["mime"], b"hello")
     client.close("test")
     wait_until(lambda: server.closed.is_set())
 
@@ -145,3 +145,148 @@ def test_stalled_frame_watchdog(monkeypatch):
 @pytest.mark.parametrize("address", ["8.8.8.8", "0.0.0.0", "224.0.0.1", "not-an-ip"])
 def test_non_lan_addresses(address):
     assert not lan_address(address)
+
+
+def test_movement_coalescing_preserves_clicks_and_control_stamps():
+    a, b = socket.socketpair()
+    session = Session(a, "peer", "PC", "local", True, lambda *args: None, lambda *args: None)
+    try:
+
+        def move(dx, dy, stamp=1):
+            return {"type": "input", "kind": "move", "dx": dx, "dy": dy, "stamp": [stamp, "peer"]}
+
+        for _ in range(1000):
+            assert session.send(move(2, -1))
+        assert len(session.outbox) == 1
+        assert session.outbox[0] == move(2000, -1000)
+        click = {"type": "input", "kind": "button", "code": 1, "down": True}
+        session.send(click)
+        session.send(move(3, 4))
+        session.send(move(5, 6, stamp=2))
+        assert list(session.outbox) == [move(2000, -1000), click, move(3, 4), move(5, 6, 2)]
+        session.send(move(32767, 0, stamp=2))
+        assert len(session.outbox) == 5  # Combined deltas must remain valid.
+    finally:
+        session.close()
+        b.close()
+
+
+def test_input_interleaves_with_large_clipboard_without_losing_content():
+    from lanmouse.core import decode_clipboard, receive
+
+    a, b = socket.socketpair()
+    first_chunk = threading.Event()
+    proceed = threading.Event()
+
+    class PacedSocket:
+        family = socket.AF_UNIX if hasattr(socket, "AF_UNIX") else -1
+
+        def settimeout(self, timeout):
+            a.settimeout(timeout)
+
+        def sendall(self, data):
+            a.sendall(data)
+            if not first_chunk.is_set():
+                first_chunk.set()
+                assert proceed.wait(3)
+
+        def shutdown(self, how):
+            a.shutdown(how)
+
+        def close(self):
+            a.close()
+
+    sender = Session(
+        PacedSocket(), "peer", "PC", "local", True, lambda *args: None, lambda *args: None
+    )
+    receiver = Session(b, "peer", "PC", "local", False, lambda *args: None, lambda *args: None)
+    raw = b"clipboard image-sized payload " * 100000
+    clipboard = {
+        "type": "clipboard",
+        "mime": "text/plain;charset=utf-8",
+        "data": raw,
+        "stamp": [1, "peer"],
+    }
+    try:
+        sender.send(clipboard)
+        worker = threading.Thread(target=sender._write, daemon=True)
+        worker.start()
+        assert first_chunk.wait(3)
+        part = receive(b)
+        assert part["type"] == "clipboard_chunk"
+        assert receiver._clipboard_part(part) is None
+        key = {"type": "input", "kind": "key", "code": 30, "down": True}
+        sender.send(key)
+        proceed.set()
+        # The key arrives ahead of the rest of the megabytes of clipboard data.
+        assert receive(b) == key
+        result = None
+        while result is None:
+            result = receiver._clipboard_part(receive(b))
+        assert result["stamp"] == clipboard["stamp"]
+        assert decode_clipboard(result) == (clipboard["mime"], raw)
+    finally:
+        proceed.set()
+        sender.close()
+        receiver.close()
+
+
+def test_tcp_nodelay_enabled_on_paired_socket(peers):
+    a, b = peers
+    a.network.connect("127.0.0.1", b.network.port)
+    for session in (a.ready.get(timeout=5), b.ready.get(timeout=5)):
+        assert session.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"index": 1},
+        {"size": 9 * 1024 * 1024},
+        {"final": "yes"},
+        {"data": "???"},
+        {"data": "YQ==", "size": 0},
+        {"size": 2},
+    ],
+)
+def test_invalid_clipboard_chunks_rejected(change):
+    a, b = socket.socketpair()
+    session = Session(a, "peer", "PC", "local", True, lambda *args: None, lambda *args: None)
+    try:
+        part = {
+            "type": "clipboard_chunk",
+            "index": 0,
+            "final": True,
+            "mime": "text/plain;charset=utf-8",
+            "data": "YQ==",
+            "size": 1,
+        }
+        with pytest.raises(ProtocolError):
+            session._clipboard_part({**part, **change})
+    finally:
+        session.close()
+        b.close()
+
+
+def test_large_image_survives_chunked_tls_transfer(peers, qt):
+    import os
+
+    from PySide6.QtGui import QImage
+
+    from lanmouse.clipboard import Clipboard
+
+    # Incompressible pixels exercise many chunks, rather than a tiny solid PNG.
+    pixels = os.urandom(768 * 512 * 4)
+    image = QImage(pixels, 768, 512, QImage.Format.Format_RGBA8888)
+    raw = Clipboard._png(image)
+    assert len(raw) > 1024 * 1024
+    a, b = peers
+    a.network.connect("127.0.0.1", b.network.port)
+    sender = a.ready.get(timeout=5)
+    b.ready.get(timeout=5)
+    sender.send(
+        {"type": "clipboard", "mime": "image/png", "data": raw, "stamp": [1, a.identity.id]}
+    )
+    result = b.messages.get(timeout=5)
+    assert decode_clipboard(result) == ("image/png", raw)
+    assert Clipboard._pixels(QImage.fromData(result["data"])) == Clipboard._pixels(image)

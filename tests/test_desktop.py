@@ -1,19 +1,12 @@
 import os
 
 import pytest
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QMimeData, QObject, QUrl, Signal
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication
 
 from lanmouse.clipboard import TEXT, Clipboard
 from lanmouse.core import Clock
 from lanmouse.identity import Identity
-
-
-@pytest.fixture(scope="module")
-def qt():
-    application = QApplication.instance() or QApplication([])
-    yield application
 
 
 @pytest.fixture
@@ -72,6 +65,12 @@ class FakeEdges(QObject):
 
     def cooldown(self):
         pass
+
+    def crossing(self):
+        return {"y": 12345}
+
+    def enter(self, crossing, backend):
+        self.entered = crossing
 
     def close(self):
         pass
@@ -193,6 +192,7 @@ def test_wayland_clipboard_sync_without_feedback(qt, monkeypatch):
     import lanmouse.clipboard as module
 
     monkeypatch.setenv("WAYLAND_DISPLAY", "isolated-test")
+    monkeypatch.setattr(Clipboard, "_watch_wayland", lambda self: None)
     content = [(TEXT, b"initial")]
     monkeypatch.setattr(Clipboard, "_wayland_read", lambda self: content[0])
     monkeypatch.setattr(module.shutil, "which", lambda command: command)
@@ -227,3 +227,179 @@ def test_wayland_clipboard_sync_without_feedback(qt, monkeypatch):
         assert changes == [(TEXT, b"new local copy")]
     finally:
         value.close()
+
+
+def test_copy_image_with_browser_url_is_shared(clipboard, qt):
+    import time
+
+    content = QMimeData()
+    image = QImage(30, 20, QImage.Format.Format_ARGB32)
+    image.fill(QColor("red"))
+    content.setImageData(image)
+    content.setUrls([QUrl("https://example.com/image.jpg")])
+    changes = []
+    clipboard.changed.connect(lambda *args: changes.append(args))
+    clipboard.clipboard.setMimeData(content)
+    end = time.monotonic() + 3
+    while not changes and time.monotonic() < end:
+        qt.processEvents()
+        time.sleep(0.005)
+    assert len(changes) == 1
+    mime, raw = changes[0]
+    assert mime == "image/png"
+    assert QImage.fromData(raw).size() == image.size()
+
+
+def test_image_receive_advertises_native_image_and_png(clipboard):
+    image = QImage(5, 5, QImage.Format.Format_ARGB32)
+    image.fill(QColor("blue"))
+    raw = clipboard._png(image)
+    clipboard.apply("image/png", raw)
+    mime = clipboard.clipboard.mimeData()
+    assert mime.hasImage()
+    assert bytes(mime.data("image/png")) == raw
+
+
+@pytest.mark.parametrize("format", ["PNG", "JPEG", "BMP", "WEBP"])
+def test_wayland_image_offer_takes_precedence_over_url(qt, monkeypatch, format):
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    from types import SimpleNamespace
+
+    import lanmouse.clipboard as module
+
+    image = QImage(20, 10, QImage.Format.Format_RGB32)
+    image.fill(QColor("green"))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    if not image.save(buffer, format):
+        pytest.skip(f"Qt lacks {format} writer")
+    mime = {"PNG": "image/png", "JPEG": "image/jpeg", "BMP": "image/bmp", "WEBP": "image/webp"}[
+        format
+    ]
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=f"text/uri-list\n{mime}\n".encode()),
+    )
+    monkeypatch.setattr(Clipboard, "_paste", staticmethod(lambda requested: bytes(data)))
+    value = Clipboard()
+    try:
+        offered, raw = value._wayland_read()
+        assert offered == "image/png"
+        assert QImage.fromData(raw).size() == image.size()
+    finally:
+        value.close()
+
+
+def test_image_compression_does_not_block_gui_or_overwrite_new_copy(clipboard, qt, monkeypatch):
+    import threading
+    import time
+
+    started, finish = threading.Event(), threading.Event()
+    original = Clipboard._png
+
+    def encode(image):
+        started.set()
+        assert finish.wait(3)
+        return original(image)
+
+    monkeypatch.setattr(Clipboard, "_png", staticmethod(encode))
+    changes = []
+    clipboard.changed.connect(lambda *args: changes.append(args))
+    image = QImage(20, 10, QImage.Format.Format_ARGB32)
+    image.fill(QColor("red"))
+    try:
+        clipboard.clipboard.setImage(image)
+        assert started.wait(3)  # setImage returned while compression is still running.
+        clipboard.clipboard.setText("newer text")
+        finish.set()
+        end = time.monotonic() + 0.15
+        while time.monotonic() < end:
+            qt.processEvents()
+            time.sleep(0.005)
+        assert changes == [(TEXT, b"newer text")]
+    finally:
+        finish.set()
+
+
+def test_remote_edge_handoff_positions_pointer(window):
+    crossing = {"y": 23456}
+    window._message({"type": "control", "owner": "other", "stamp": [1, "other"], "edge": crossing})
+    assert window.backend.receiving
+    assert window.edges.entered == crossing
+    assert not window.edges.sending
+    window._edge_hit()
+    assert window.owner is None
+    assert window.session.sent[-1]["edge"] == {"y": 12345}
+
+
+def test_quick_reverse_edge_crossing_is_not_blocked_by_hotkey_debounce(window):
+    import time
+
+    window.last_switch = time.monotonic()
+    window._edge_hit()
+    assert window.backend.active
+    assert window.edges.sending
+    window._message({"type": "control", "owner": None, "stamp": [2, "other"], "edge": {"y": 12345}})
+    assert not window.backend.active
+    assert window.edges.entered == {"y": 12345}
+
+
+def test_invalid_edge_position_rejected(window):
+    with pytest.raises(ValueError):
+        window._message(
+            {"type": "control", "owner": "other", "stamp": [1, "other"], "edge": {"y": 65536}}
+        )
+
+
+def test_duplicate_image_notifications_do_not_cancel_pending_compression(
+    clipboard, qt, monkeypatch
+):
+    import threading
+    import time
+
+    started, finish = threading.Event(), threading.Event()
+    original = Clipboard._png
+
+    def encode(image):
+        started.set()
+        assert finish.wait(3)
+        return original(image)
+
+    monkeypatch.setattr(Clipboard, "_png", staticmethod(encode))
+    changes = []
+    clipboard.changed.connect(lambda *args: changes.append(args))
+    image = QImage(25, 15, QImage.Format.Format_ARGB32)
+    image.fill(QColor("yellow"))
+    try:
+        clipboard.clipboard.setImage(image)
+        assert started.wait(3)
+        clipboard._qt_changed()  # Some clipboard owners announce the same offer twice.
+        finish.set()
+        end = time.monotonic() + 3
+        while not changes and time.monotonic() < end:
+            qt.processEvents()
+            time.sleep(0.005)
+        assert len(changes) == 1 and changes[0][0] == "image/png"
+    finally:
+        finish.set()
+
+
+def test_explicit_png_with_url_is_shared_without_native_image(clipboard, qt):
+    import time
+
+    image = QImage(10, 5, QImage.Format.Format_ARGB32)
+    image.fill(QColor("cyan"))
+    content = QMimeData()
+    content.setData("image/png", QByteArray(clipboard._png(image)))
+    content.setUrls([QUrl("https://example.com/image.png")])
+    changes = []
+    clipboard.changed.connect(lambda *args: changes.append(args))
+    clipboard.clipboard.setMimeData(content)
+    end = time.monotonic() + 3
+    while not changes and time.monotonic() < end:
+        qt.processEvents()
+        time.sleep(0.005)
+    assert len(changes) == 1
+    assert QImage.fromData(changes[0][1]).size() == image.size()

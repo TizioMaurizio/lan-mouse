@@ -25,7 +25,7 @@ class LinuxInput:
         self.devices = {}
         self.pressed = set()
         self.closed = threading.Event()
-        self.keyboard = self.mouse = None
+        self.keyboard = self.mouse = self.pointer = None
         self.ready = False
         try:
             self.keyboard = evdev.UInput({e.EV_KEY: sorted(SCAN)}, name=f"{PREFIX} Keyboard")
@@ -35,6 +35,17 @@ class LinuxInput:
                     e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL],
                 },
                 name=f"{PREFIX} Mouse",
+            )
+            self.pointer = evdev.UInput(
+                {
+                    e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT],
+                    e.EV_ABS: [
+                        (e.ABS_X, evdev.AbsInfo(0, 0, 65535, 0, 0, 1)),
+                        (e.ABS_Y, evdev.AbsInfo(0, 0, 65535, 0, 0, 1)),
+                    ],
+                },
+                name=f"{PREFIX} Absolute Pointer",
+                input_props=[e.INPUT_PROP_POINTER],
             )
             self._scan()
             if not any(
@@ -102,7 +113,7 @@ class LinuxInput:
 
     def _run(self):
         last_scan = time.monotonic()
-        while not self.closed.wait(0.005):
+        while not self.closed.is_set():
             try:
                 if time.monotonic() - last_scan > 2:
                     self._scan()
@@ -115,6 +126,7 @@ class LinuxInput:
                 with self.lock:
                     devices = list(self.devices.values())
                 if not devices:
+                    self.closed.wait(0.1)
                     continue
                 readable, _, _ = select.select(devices, [], [], 0.1)
                 for device in readable:
@@ -125,6 +137,8 @@ class LinuxInput:
             except BlockingIOError:
                 continue
             except Exception as exc:
+                if self.closed.is_set():
+                    return
                 self.set_active(False)
                 self.release_all()
                 self.error(f"Input stopped: {exc}")
@@ -202,6 +216,14 @@ class LinuxInput:
                 self.mouse.write(e.EV_REL, codes[1], message["dy"])
                 self.mouse.syn()
 
+    def warp(self, x, y):
+        with self.lock:
+            if not self.pointer:
+                raise RuntimeError("Linux pointer is unavailable")
+            self.pointer.write(e.EV_ABS, e.ABS_X, x)
+            self.pointer.write(e.EV_ABS, e.ABS_Y, y)
+            self.pointer.syn()
+
     def release_all(self):
         with self.lock:
             for kind, code in list(self.pressed):
@@ -221,6 +243,6 @@ class LinuxInput:
             for device in self.devices.values():
                 device.close()
             self.devices.clear()
-            for device in (self.mouse, self.keyboard):
+            for device in (self.mouse, self.keyboard, self.pointer):
                 if device:
                     device.close()

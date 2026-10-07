@@ -6,7 +6,7 @@ import json
 import struct
 
 PORT = 45831
-VERSION = 1
+VERSION = 2
 MAX_CLIPBOARD = 8 * 1024 * 1024
 MAX_FRAME = 12 * 1024 * 1024
 MAX_PIXELS = 32_000_000
@@ -121,12 +121,17 @@ def clipboard_digest(mime, data):
 def decode_clipboard(message):
     mime = message.get("mime")
     data = message.get("data")
-    if mime not in MIMES or not isinstance(data, str) or len(data) > MAX_CLIPBOARD * 4 // 3 + 4:
+    if mime not in MIMES or not isinstance(data, (str, bytes)):
         raise ProtocolError("Unsupported or oversized clipboard")
-    try:
-        raw = base64.b64decode(data, validate=True)
-    except ValueError as exc:
-        raise ProtocolError("Invalid clipboard encoding") from exc
+    if isinstance(data, bytes):
+        raw = data  # Reassembled by Session; JSON cannot supply a bytes value.
+    else:
+        if len(data) > MAX_CLIPBOARD * 4 // 3 + 4:
+            raise ProtocolError("Unsupported or oversized clipboard")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except ValueError as exc:
+            raise ProtocolError("Invalid clipboard encoding") from exc
     if len(raw) > MAX_CLIPBOARD:
         raise ProtocolError("Clipboard too large")
     if mime.startswith("text/"):

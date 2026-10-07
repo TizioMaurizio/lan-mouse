@@ -143,3 +143,9 @@ def test_linux_repeat_forwarded_but_not_reinjected(backend):
     assert events[-1]["repeat"] is True
     value.inject(events[-1])
     assert not value.keyboard.events
+
+
+def test_absolute_pointer_can_place_cursor_without_acceleration(backend):
+    value, *_ = backend
+    value.warp(100, 35000)
+    assert value.pointer.events == [(e.EV_ABS, e.ABS_X, 100), (e.EV_ABS, e.ABS_Y, 35000)]

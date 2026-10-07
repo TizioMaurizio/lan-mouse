@@ -50,9 +50,10 @@ downloads Qt and may take a few minutes.
    **Connect**. Approve the connection on both computers.
 3. Set **The other computer is on my Right/Left** to match your desk on each PC.
    For example: Linux = Right, Windows = Left when Windows sits to Linux's right.
-4. Move the pointer to that edge to control the other computer. On KDE, push
-   against the edge briefly; KWin applies its configured edge activation delay.
-   Alternatively, press **F8** or click **Control the other computer**.
+4. Move the pointer to that edge to control the other computer. Crossing switches
+   immediately, including on KDE Wayland. The pointer enters the other screen
+   just inside its joining edge, at the same relative height. Alternatively, press
+   **F8** or click **Control the other computer**.
 5. Move to the joining edge on the receiving PC, or press **F8** again, to return
    to local control. F8 on either PC returns both PCs to local control.
 6. Copy and paste normally. Plain text and images synchronize in either
@@ -66,6 +67,18 @@ If discovery does not find the other PC, enter its IPv4 address in **Connect by
 IP**. Each app displays its own IP at the top. This needs no router port forwarding.
 The computer that initiates a connection supplies the initial clipboard content;
 later copies on either computer update both clipboards.
+
+Image compression runs in the background. Clipboard transfers use small chunks
+interleaved with mouse/keyboard input; they do not occupy the connection as one
+large message. Mouse movements combine adjacent bursts at up to 500 updates per
+second while preserving key, click, scroll and handoff ordering.
+
+## Updating an existing installation
+
+Close LAN Mouse, run `git pull` in this folder on **both PCs**, then run
+`start.sh` on Linux or `start.cmd` on Windows again. Version 0.2 changes the wire
+protocol to support clipboard chunks, so both PCs must be updated. Saved
+pairings remain valid; you do not need to approve the computers again.
 
 The app stays running when minimized. Closing its window or choosing **Quit**
 stops sharing. **Disconnect** pauses reconnection on that PC until you click
@@ -83,15 +96,19 @@ press F8 to resume remote control.
 
 The KWin script is loaded only while connected with screen switching enabled,
 and unloaded when disconnected or closed. It is not installed as a permanent
-KWin extension. If that edge is already used by another KDE feature, turn off
-screen-edge switching and use F8. On KDE Wayland the receiving pointer keeps
-its previous position when switching; the script handles crossing between PCs.
+KWin extension. It observes cursor movement directly, without KDE's screen-edge
+activation delay. Joining edges rearm as soon as the pointer moves inward, so
+you can cross back immediately. KDE Wayland uses a virtual absolute pointer
+for precise placement without mouse acceleration.
 
 ## Current limits
 
 - Two computers per connection; one controls the other at a time.
-- Clipboard: plain UTF-8 text and PNG images, at most **8 MiB** per item and
-  32 million pixels per image. Rich text formatting and file transfers are not included.
+- Clipboard: plain UTF-8 text and images, at most **8 MiB** per item and
+  32 million pixels per image. Screenshots and browser **Copy image** work in
+  either direction, including image offers that also contain a URL. Native
+  Windows images and supported Wayland PNG/JPEG/WebP/BMP/TIFF offers are
+  transferred as PNG. Rich text formatting and file transfers are not included.
 - Linux absolute devices (touchpads, tablets and touchscreens) are not forwarded.
   Use a relative mouse. An absolute device may still move the local pointer.
 - Common PC keyboard keys, modifiers, navigation, F1–F12, and common media keys
@@ -103,8 +120,8 @@ its previous position when switching; the script handles crossing between PCs.
   outside the app's scope. Elevated Windows apps may require starting LAN Mouse
   as administrator.
 - IPv4 local networks. Guest Wi-Fi/client isolation may prevent communication.
-- This is a first version. Automated tests run here on Linux; native input on
-  your Windows PC and a physical two-PC session still need an end-to-end check.
+- Automated checks run on Linux and Windows. Physical two-PC behavior,
+  including timing on your network, still needs a check after each update.
 
 ## Connection and trust
 
@@ -144,7 +161,8 @@ python -m ruff check .
 Tests exercise real TLS sockets, pairing denial, certificate changes, automatic
 reconnect by saved IP, framing limits, Unicode text, image clipboard feedback,
 control handoff, stale input rejection, device-grab rollback, hotkey recovery,
-and disconnect recovery. Desktop tests use an isolated Qt clipboard; backend
+disconnect recovery, browser image offers, lossless chunked image transfers,
+input priority during large clipboard transfers, and immediate edge rearming. Desktop tests use an isolated Qt clipboard; backend
 tests mock hardware so they never take over the developer's input devices.
 
 The included GitHub Actions workflow runs these checks on Linux and Windows

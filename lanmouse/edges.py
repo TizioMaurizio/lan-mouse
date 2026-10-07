@@ -1,19 +1,18 @@
 """Screen edge switching: native KWin script on KDE, cursor polling on X11/Windows."""
 
 import os
-import time
 
-from PySide6.QtCore import ClassInfo, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import ClassInfo, QObject, QRect, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCursor, QGuiApplication
 
 
 @ClassInfo({"D-Bus Interface": "org.lanmouse.Edge"})
 class EdgeEndpoint(QObject):
-    hit = Signal()
+    position = Signal(int, int, int, int, int, int)
 
-    @Slot()
-    def activate(self):
-        self.hit.emit()
+    @Slot(int, int, int, int, int, int)
+    def moved(self, x, y, left, top, width, height):
+        self.position.emit(x, y, left, top, width, height)
 
 
 class Edges(QObject):
@@ -24,7 +23,9 @@ class Edges(QObject):
         self.directory = directory
         self.enabled = False
         self.side = "right"
-        self.last_hit = 0
+        self.sending = False
+        self.position = None
+        self.geometry = None
         self.at_edge = True
         self.kwin = None
         self.endpoint = None
@@ -32,7 +33,8 @@ class Edges(QObject):
         self.description = "Move to the selected screen edge, or press F8."
         self.wayland = os.name != "nt" and bool(os.environ.get("WAYLAND_DISPLAY"))
         self.timer = QTimer(self)
-        self.timer.setInterval(30)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.timer.setInterval(4)
         self.timer.timeout.connect(self._poll)
         if self.wayland:
             if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", ""):
@@ -55,7 +57,7 @@ class Edges(QObject):
         self.bus.registerObject(
             "/Edge", self.endpoint, QDBusConnection.RegisterOption.ExportAllSlots
         )
-        self.endpoint.hit.connect(self._hit)
+        self.endpoint.position.connect(self._sample)
         self.kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", self.bus)
         if not self.kwin.isValid():
             self.available = False
@@ -68,11 +70,20 @@ class Edges(QObject):
             self.kwin.call("unloadScript", "lan-mouse-python-edge")
             if enabled:
                 path = self.directory / "edge.js"
-                border = "KWin.ElectricRight" if side == "right" else "KWin.ElectricLeft"
                 path.write_text(
-                    f"registerScreenEdge({border}, function() {{\n"
-                    '  callDBus("org.lanmouse.Edge", "/Edge", "org.lanmouse.Edge", "activate");\n'
-                    "});\n"
+                    "var last = 0;\n"
+                    "function report() {\n"
+                    "  var p = workspace.cursorPos;\n"
+                    "  var g = workspace.virtualScreenGeometry;\n"
+                    "  var now = Date.now();\n"
+                    "  var edge = p.x <= g.x + 16 || p.x >= g.x + g.width - 17;\n"
+                    "  if (!edge && now - last < 4) return;\n"
+                    "  last = now;\n"
+                    '  callDBus("org.lanmouse.Edge", "/Edge", "org.lanmouse.Edge", "moved",\n'
+                    "    Math.round(p.x), Math.round(p.y), g.x, g.y, g.width, g.height);\n"
+                    "}\n"
+                    "workspace.cursorPosChanged.connect(report);\n"
+                    "report();\n"
                 )
                 reply = self.kwin.call("loadScript", str(path), "lan-mouse-python-edge")
                 from PySide6.QtDBus import QDBusInterface, QDBusMessage
@@ -101,22 +112,66 @@ class Edges(QObject):
         screens = QGuiApplication.screens()
         if not screens:
             return
+        geometry = screens[0].geometry()
+        for screen in screens[1:]:
+            geometry = geometry.united(screen.geometry())
         position = QCursor.pos()
-        # Only the outside edge of the whole desktop, so internal monitor edges stay usable.
-        left = min(screen.geometry().left() for screen in screens)
-        right = max(screen.geometry().right() for screen in screens)
-        at_edge = position.x() <= left if self.side == "left" else position.x() >= right
-        if at_edge and not self.at_edge:
+        self._sample(
+            position.x(),
+            position.y(),
+            geometry.x(),
+            geometry.y(),
+            geometry.width(),
+            geometry.height(),
+        )
+
+    def _sample(self, x, y, left, top, width, height):
+        self.position = (x, y)
+        self.geometry = QRect(left, top, width, height)
+        distance = x - left if self.side == "left" else left + width - 1 - x
+        # Rearm after moving a few pixels inward, not after a fixed time delay.
+        # The compositor can report an edge repeatedly while the pointer is clipped.
+        if distance >= 4:
+            self.at_edge = False
+        elif distance <= 0 and not self.at_edge:
+            self.at_edge = True
             self._hit()
-        self.at_edge = at_edge
 
     def _hit(self):
-        if self.enabled and time.monotonic() - self.last_hit > 1.3:
-            self.last_hit = time.monotonic()
+        if self.enabled and not self.sending:
             self.hit.emit()
 
+    def crossing(self):
+        if self.position is None or self.geometry is None:
+            return {"y": 32768}
+        g = self.geometry
+        y = round((self.position[1] - g.top()) * 65535 / max(1, g.height() - 1))
+        return {"y": max(0, min(65535, y))}
+
+    def enter(self, crossing, backend):
+        geometry = self.geometry
+        if geometry is None:
+            screens = QGuiApplication.screens()
+            if not screens:
+                return
+            geometry = screens[0].geometry()
+            for screen in screens[1:]:
+                geometry = geometry.united(screen.geometry())
+        x = geometry.left() + 8 if self.side == "left" else geometry.right() - 8
+        y = geometry.top() + round(crossing["y"] * (geometry.height() - 1) / 65535)
+        if self.wayland:
+            backend.warp(
+                round((x - geometry.left()) * 65535 / max(1, geometry.width() - 1)), crossing["y"]
+            )
+        else:
+            QCursor.setPos(x, y)
+        self.position = (x, y)
+        self.geometry = geometry
+        # Ignore any old border reports already queued by the compositor. The
+        # first report from the inset position rearms crossing immediately.
+        self.at_edge = self.wayland
+
     def cooldown(self):
-        self.last_hit = time.monotonic()
         self.at_edge = True
 
     def close(self):

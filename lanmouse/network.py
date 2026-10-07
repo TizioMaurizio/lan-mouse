@@ -2,21 +2,33 @@
 
 import base64
 import ipaddress
-import queue
 import secrets
 import socket
 import ssl
 import threading
 import time
+from collections import deque
 
 import ifaddr
 from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, Zeroconf
 
-from .core import PORT, VERSION, ProtocolError, encode, receive
+from .core import (
+    MAX_CLIPBOARD,
+    MIMES,
+    PORT,
+    VERSION,
+    ProtocolError,
+    decode_clipboard,
+    encode,
+    integer,
+    receive,
+)
 from .identity import certificate_name, fingerprint, verify_proof
 
 SERVICE = "_lanmousepy._tcp.local."
 HEARTBEAT_TIMEOUT = 8
+CLIPBOARD_CHUNK = 16 * 1024
+MOVE_INTERVAL = 0.002
 
 
 def lan_address(address):
@@ -41,7 +53,15 @@ class Session:
         self.sock, self.peer_id, self.name = sock, peer_id, name
         self.address, self.initiator = address, initiator
         self.on_message, self.on_close = on_message, on_close
-        self.outbox = queue.Queue(maxsize=1024)
+        self.outbox = deque()
+        self.clipboards = deque(maxlen=1)  # The most recent pending copy wins.
+        self.wake = threading.Condition()
+        self.transfer = None
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # Keep bulk clipboard data from building a megabyte-sized backlog in
+            # the kernel ahead of the next input packet on a slower Wi-Fi link.
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 64 * 1024)
         self.closed = threading.Event()
         self.last_received = time.monotonic()
         self.sock.settimeout(HEARTBEAT_TIMEOUT)
@@ -51,34 +71,158 @@ class Session:
         for target in (self._read, self._write, self._heartbeat):
             threading.Thread(target=target, daemon=True).start()
 
+    @staticmethod
+    def _move(message):
+        return message.get("type") == "input" and message.get("kind") == "move"
+
     def send(self, message):
-        if self.closed.is_set():
-            return False
+        with self.wake:
+            if self.closed.is_set():
+                return False
+            if message["type"] == "clipboard":
+                self.clipboards.append(message)
+            else:
+                # Merge only adjacent movements in the same control session. Never
+                # move a click, key, scroll or handoff ahead of its preceding motion.
+                if self.outbox and self._move(message) and self._move(self.outbox[-1]):
+                    previous = self.outbox[-1]
+                    dx = previous["dx"] + message["dx"]
+                    dy = previous["dy"] + message["dy"]
+                    if previous.get("stamp") == message.get("stamp") and (
+                        -32768 <= dx <= 32768 and -32768 <= dy <= 32768
+                    ):
+                        self.outbox[-1] = {**message, "dx": dx, "dy": dy}
+                        return True
+                if len(self.outbox) >= 1024:
+                    # Close outside the condition: on_close can call back into send.
+                    overflow = True
+                else:
+                    self.outbox.append(message)
+                    overflow = False
+                if not overflow:
+                    self.wake.notify()
+                    return True
+            if message["type"] == "clipboard":
+                self.wake.notify()
+                return True
+        self.close("Connection too slow; local control restored")
+        return False
+
+    def _clipboard_part(self, message):
+        index = integer(message.get("index"), 0, MAX_CLIPBOARD // CLIPBOARD_CHUNK)
+        final = message.get("final")
+        data = message.get("data")
+        if (
+            type(final) is not bool
+            or not isinstance(data, str)
+            or (len(data) > CLIPBOARD_CHUNK * 4 // 3 + 4)
+        ):
+            raise ProtocolError("Invalid clipboard chunk")
         try:
-            self.outbox.put_nowait(message)
-            return True
-        except queue.Full:
-            self.close("Connection too slow; local control restored")
-            return False
+            raw = base64.b64decode(data, validate=True)
+        except ValueError as exc:
+            raise ProtocolError("Invalid clipboard chunk encoding") from exc
+        if len(raw) > CLIPBOARD_CHUNK:
+            raise ProtocolError("Clipboard chunk too large")
+        if index == 0:
+            if self.transfer is not None or message.get("mime") not in MIMES:
+                raise ProtocolError("Invalid clipboard transfer")
+            self.transfer = {
+                "type": "clipboard",
+                "mime": message["mime"],
+                "stamp": message.get("stamp"),
+                "data": bytearray(),
+                "index": 0,
+                "size": integer(message.get("size"), 0, MAX_CLIPBOARD),
+            }
+        transfer = self.transfer
+        if transfer is None or index != transfer["index"]:
+            raise ProtocolError("Out-of-order clipboard chunk")
+        if len(transfer["data"]) + len(raw) > transfer["size"] or (not final and not raw):
+            raise ProtocolError("Clipboard transfer too large or empty")
+        transfer["data"].extend(raw)
+        transfer["index"] += 1
+        if final:
+            if len(transfer["data"]) != transfer["size"]:
+                raise ProtocolError("Incomplete clipboard transfer")
+            self.transfer = None
+            result = {k: transfer[k] for k in ("type", "mime", "stamp")}
+            result["data"] = bytes(transfer["data"])
+            decode_clipboard(result)
+            return result
+        return None
 
     def _read(self):
         try:
             while not self.closed.is_set():
                 message = receive(self.sock)
                 self.last_received = time.monotonic()
-                if message["type"] != "ping":
+                if message["type"] == "clipboard_chunk":
+                    message = self._clipboard_part(message)
+                if message is not None and message["type"] != "ping":
                     self.on_message(self, message)
         except (OSError, EOFError, ValueError) as exc:
             self.close(f"Disconnected: {exc}")
 
+    @staticmethod
+    def _chunks(message):
+        mime, raw = decode_clipboard(message)
+        count = max(1, (len(raw) + CLIPBOARD_CHUNK - 1) // CLIPBOARD_CHUNK)
+        for index in range(count):
+            part = raw[index * CLIPBOARD_CHUNK : (index + 1) * CLIPBOARD_CHUNK]
+            chunk = {
+                "type": "clipboard_chunk",
+                "index": index,
+                "final": index == count - 1,
+                "data": base64.b64encode(part).decode("ascii"),
+            }
+            if index == 0:
+                chunk.update(mime=mime, stamp=message.get("stamp"), size=len(raw))
+            yield chunk
+
     def _write(self):
+        chunks = None
+        input_count = 0
+        next_move = 0
         try:
             while not self.closed.is_set():
-                try:
-                    message = self.outbox.get(timeout=0.5)
-                except queue.Empty:
-                    continue
+                with self.wake:
+                    if not self.outbox and not self.clipboards and chunks is None:
+                        self.wake.wait(timeout=0.5)
+                        continue
+                    message = None
+                    take_input = self.outbox and (
+                        input_count < 32 or (chunks is None and not self.clipboards)
+                    )
+                    if take_input:
+                        # Cap motion at 500 Hz and allow axes/bursts to combine.
+                        # Key/button/control messages behind a movement flush it now.
+                        if self._move(self.outbox[0]) and len(self.outbox) == 1:
+                            delay = next_move - time.monotonic()
+                            if delay > 0:
+                                if chunks is not None or self.clipboards:
+                                    take_input = False
+                                else:
+                                    self.wake.wait(timeout=delay)
+                                    continue
+                    if take_input:
+                        message = self.outbox.popleft()
+                        input_count += 1
+                    elif chunks is None and self.clipboards:
+                        clipboard = self.clipboards.popleft()
+                    else:
+                        clipboard = None
+                if message is None:
+                    if chunks is None:
+                        chunks = self._chunks(clipboard)
+                    message = next(chunks, None)
+                    input_count = 0
+                    if message is None:
+                        chunks = None
+                        continue
                 self.sock.sendall(encode(message))
+                if self._move(message):
+                    next_move = time.monotonic() + MOVE_INTERVAL
         except (OSError, ValueError) as exc:
             self.close(f"Disconnected: {exc}")
 
@@ -95,6 +239,10 @@ class Session:
             if self.closed.is_set():
                 return
             self.closed.set()
+            with self.wake:
+                self.wake.notify_all()
+                self.clipboards.clear()
+                self.outbox.clear()
             try:
                 self.sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -244,7 +392,9 @@ class Network:
                 raise ProtocolError("Computer identity changed; reconnect and approve it again")
             greeting = receive(sock, limit=16384)
             if greeting.get("type") != "challenge" or greeting.get("version") != VERSION:
-                raise ProtocolError("Different app version")
+                raise ProtocolError(
+                    "Different app version; update and restart LAN Mouse on both PCs"
+                )
             nonce = base64.b64decode(greeting.get("nonce", ""), validate=True)
             if len(nonce) != 32:
                 raise ProtocolError("Invalid authentication challenge")
