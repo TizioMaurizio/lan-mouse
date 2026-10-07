@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, Signal
 from PySide6.QtGui import QColor, QImage
@@ -184,6 +186,7 @@ def test_qt_gui_renders(window, qt):
     assert window.connect_button.geometry().top() > window.list.geometry().bottom()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Wayland clipboard adapter is Linux-only")
 def test_wayland_clipboard_sync_without_feedback(qt, monkeypatch):
     import time
 
