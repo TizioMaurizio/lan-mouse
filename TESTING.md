@@ -6,7 +6,7 @@ Qt: PySide6 6.11.2.
 
 Verified locally:
 
-- **81 tests passed**, with the Windows-only backend module skipped on Linux.
+- **84 tests passed**, with the Windows-only backend module skipped on Linux.
 - Automated Python test suite on Linux, including live loopback TLS connections.
 - GUI starts and renders. Missing `/dev/uinput` permissions produce a setup
   message and leave physical input untouched.
@@ -66,7 +66,9 @@ Not yet verified:
 7. While controlling the remote PC, stop the receiver app or disconnect Wi-Fi.
    Confirm local input returns within about eight seconds. Pressing F8 should
    return sooner. Restart/reconnect and confirm no approval prompt repeats.
-8. Close the app on both PCs and check that each keyboard and mouse works normally.
+8. Close the window and confirm sharing stays connected through the tray icon.
+   Reopen it from the tray, then choose Quit in the tray menu on both PCs and
+   check that each keyboard and mouse works normally.
 
 Use ordinary desktop apps for the first check. Windows elevation and secure
 desktop behavior are documented limitations.

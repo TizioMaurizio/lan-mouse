@@ -55,6 +55,7 @@ class Window(QMainWindow):
         self.last_switch = 0
         self.pending_approvals = []
         self.closing = False
+        self.quit_requested = False
         self.events = Signals()
         self.setWindowTitle("LAN Mouse")
         self.resize(580, 710)
@@ -207,11 +208,11 @@ class Window(QMainWindow):
         self.tray = QSystemTrayIcon(QIcon(pixmap), self)
         menu = QMenu(self)
         show = QAction("Show LAN Mouse", self)
-        show.triggered.connect(self.show)
+        show.triggered.connect(self.show_window)
         switch = QAction("Switch computer (F8)", self)
         switch.triggered.connect(self.toggle)
         quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self.quit)
         menu.addAction(show)
         menu.addAction(switch)
         menu.addAction(quit_action)
@@ -219,10 +220,26 @@ class Window(QMainWindow):
         self.tray.setToolTip("LAN Mouse · F8 switches computers")
         self.tray.activated.connect(
             lambda reason: (
-                self.show() if reason == QSystemTrayIcon.ActivationReason.Trigger else None
+                self.show_window()
+                if reason
+                in (
+                    QSystemTrayIcon.ActivationReason.Trigger,
+                    QSystemTrayIcon.ActivationReason.DoubleClick,
+                )
+                else None
             )
         )
         self.tray.show()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def quit(self):
+        self.quit_requested = True
+        self.close()
+        QApplication.instance().quit()
 
     def _status(self, text):
         self.detail.setText(text)
@@ -471,6 +488,17 @@ class Window(QMainWindow):
             self.clipboard.enable(bool(self.session) and checked)
 
     def closeEvent(self, event):
+        if not self.quit_requested:
+            event.ignore()
+            if self.tray and self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable():
+                self.hide()
+            else:
+                # Keep an accessible taskbar window when a desktop has no tray.
+                self.showMinimized()
+            return
+        if self.closing:
+            event.accept()
+            return
         self.closing = True
         for request in self.pending_approvals:
             request["done"].set()
@@ -495,6 +523,7 @@ def main():
             pass
     application = QApplication(sys.argv)
     application.setApplicationName("LAN Mouse")
+    application.setQuitOnLastWindowClosed(False)
     try:
         window = Window()
     except Exception as exc:

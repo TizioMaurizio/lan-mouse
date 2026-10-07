@@ -132,7 +132,7 @@ def window(qt, tmp_path, monkeypatch):
     value = app.Window(Identity(tmp_path / "gui", "Linux PC"), FakeBackend, start_network=False)
     value._connected(FakeSession())
     yield value
-    value.close()
+    value.quit()
 
 
 def test_switch_forward_and_return(window):
@@ -432,3 +432,46 @@ def test_network_disconnect_rearms_edges_after_reconnect(window):
     window._connected(FakeSession())
     window._edge_hit()
     assert window.backend.active
+
+
+def test_window_close_hides_to_tray_without_stopping_sharing(window, qt, monkeypatch):
+    from types import SimpleNamespace
+
+    import lanmouse.app as module
+
+    window.tray = SimpleNamespace(isVisible=lambda: True, hide=lambda: None)
+    monkeypatch.setattr(module.QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+    window.show()
+    window.toggle()
+    session = window.session
+    window.close()
+    qt.processEvents()
+    assert not window.isVisible()
+    assert not window.closing
+    assert not session.closed.is_set()
+    assert window.backend.active
+    assert window.timer.isActive()
+    window.show_window()
+    assert window.isVisible() and not window.isMinimized()
+
+
+def test_window_close_minimizes_when_tray_is_unavailable(window, qt, monkeypatch):
+    import lanmouse.app as module
+
+    monkeypatch.setattr(module.QSystemTrayIcon, "isSystemTrayAvailable", lambda: False)
+    window.show()
+    window.close()
+    qt.processEvents()
+    assert window.isVisible() and window.isMinimized()
+    assert not window.closing
+    assert window.timer.isActive()
+
+
+def test_explicit_quit_stops_sharing_and_releases_input(window):
+    window.toggle()
+    window.quit()
+    assert window.closing
+    assert not window.backend.active
+    assert not window.timer.isActive()
+    assert window.clipboard.closed.is_set()
+    assert window.network.stopped.is_set()
