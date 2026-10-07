@@ -108,6 +108,12 @@ class Identity:
             }
             self.save()
 
+    def mark_connected(self, peer_id):
+        with self.lock:
+            if peer_id in self.settings["peers"] and self.settings.get("last_peer") != peer_id:
+                self.settings["last_peer"] = peer_id
+                self.save()
+
     def sign(self, challenge):
         return base64.b64encode(
             self.key.sign(

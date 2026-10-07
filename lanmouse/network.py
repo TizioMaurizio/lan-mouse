@@ -503,6 +503,7 @@ class Network:
                 sock, peer_id, name, address, initiator, self.on_message, self._closed
             )
             self.session = session
+            self.identity.mark_connected(peer_id)
         self.on_ready(session)
         # The GUI starts reader/writer threads after it installs the session state.
 
@@ -513,22 +514,34 @@ class Network:
         self.on_close(session, reason)
 
     def _reconnect(self):
-        while not self.stopped.wait(3):
-            if self.session or self.paused:
-                continue
-            with self.lock, self.identity.lock:
-                candidates = list(self.peers.values())
-                known = dict(self.identity.settings["peers"])
-            for candidate in self._reconnect_candidates(candidates, known):
-                if self.session or self.paused or self.stopped.is_set():
-                    break
-                # Try each endpoint in turn; a failed discovery address must not
-                # hide the last successful IP or starve the remaining adapters.
-                self._connect(candidate["address"], candidate["port"], candidate["id"], False)
+        while not self.stopped.is_set():
+            if not self.session and not self.paused:
+                with self.lock, self.identity.lock:
+                    candidates = list(self.peers.values())
+                    known = dict(self.identity.settings["peers"])
+                    last_peer = self.identity.settings.get("last_peer")
+                for candidate in self._reconnect_candidates(candidates, known, last_peer):
+                    if self.session or self.paused or self.stopped.is_set():
+                        break
+                    # Try each endpoint in turn; a failed discovery address must not
+                    # hide the last successful IP or starve the remaining adapters.
+                    self._connect(candidate["address"], candidate["port"], candidate["id"], False)
+            if self.stopped.wait(3):
+                break
 
-    def _reconnect_candidates(self, discovered, known):
+    def _reconnect_candidates(self, discovered, known, last_peer=None):
         result = []
+        # Existing installations have no last_peer setting. Their sole paired
+        # computer is unambiguous; multiple old pairings need a manual choice.
+        if isinstance(last_peer, str) and last_peer in known:
+            target = last_peer
+        elif len(known) == 1:
+            target = next(iter(known))
+        else:
+            return result
         for peer_id, saved in known.items():
+            if peer_id != target:
+                continue
             # Only the lower identity initiates, avoiding double sessions.
             if self.identity.id >= peer_id:
                 continue

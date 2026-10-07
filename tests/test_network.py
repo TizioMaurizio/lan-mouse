@@ -112,6 +112,47 @@ def test_reconnection_uses_saved_ip_and_needs_no_approval(peers):
     assert len(a.approvals) == len(b.approvals) == 1
 
 
+def test_restart_connects_to_last_peer_without_another_approval(tmp_path):
+    a, b = sorted(
+        (Peer(tmp_path / "a", "Linux"), Peer(tmp_path / "b", "Windows")),
+        key=lambda peer: peer.identity.id,
+    )
+    restarted = None
+    try:
+        a.network.connect("127.0.0.1", b.network.port)
+        a.ready.get(timeout=5)
+        server = b.ready.get(timeout=5)
+        assert a.identity.settings["last_peer"] == b.identity.id
+        assert b.identity.settings["last_peer"] == a.identity.id
+        a.stop()
+        wait_until(lambda: server.closed.is_set())
+
+        restarted = Peer(a.identity.directory, "Ignored new name")
+        client = restarted.ready.get(timeout=5)
+        b.ready.get(timeout=5)
+        assert client.peer_id == b.identity.id
+        assert restarted.approvals == []
+        assert len(b.approvals) == 1
+    finally:
+        if restarted:
+            restarted.stop()
+        a.stop()
+        b.stop()
+
+
+def test_startup_candidates_include_only_last_connected_peer(peers, tmp_path):
+    a, b = sorted(peers, key=lambda peer: peer.identity.id)
+    other = Identity(tmp_path / "other", "Other")
+    a.identity.remember(b.identity.der, "127.0.0.1", b.network.port)
+    a.identity.remember(other.der, "127.0.0.2")
+    a.identity.mark_connected(b.identity.id)
+    saved = Identity(a.identity.directory)
+
+    candidates = a.network._reconnect_candidates([], saved.settings["peers"], saved.settings["last_peer"])
+    assert candidates == [{"id": b.identity.id, "address": "127.0.0.1", "port": b.network.port}]
+    assert a.network._reconnect_candidates([], saved.settings["peers"]) == []
+
+
 def test_identity_persists_and_proof_binds_to_nonce(tmp_path):
     a = Identity(tmp_path, "Test")
     b = Identity(tmp_path)

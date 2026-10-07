@@ -5,7 +5,8 @@ on the same local network. Run the same app on both computers.
 
 Choose the other computer and approve the connection once on each screen.
 There are no security keys, pairing codes, accounts or cloud services to set up.
-Paired computers reconnect automatically while the app is open.
+The last connected computer reconnects automatically when both apps are open.
+Previously approved computers do not ask for approval again.
 
 This is an independent Python app, not Microsoft's Mouse Without Borders or
 the Rust project also named Lan Mouse. It connects only to another copy of this app.
@@ -45,18 +46,19 @@ downloads Qt and may take a few minutes.
 
 ## Connect and use
 
-1. Open LAN Mouse on both PCs.
-2. On either PC, select the other computer under **Nearby computers** and click
-   **Connect**. Approve the connection on both computers.
-3. Set **The other computer is on my Right/Left** to match your desk on each PC.
+1. Open LAN Mouse on both PCs. On the first connection, select the other computer
+   under **Nearby computers**, click **Connect**, and approve on both computers.
+   Later launches reconnect to the last connected computer automatically.
+   Existing installations with just one saved pairing also reconnect automatically.
+2. Set **The other computer is on my Right/Left** to match your desk on each PC.
    For example: Linux = Right, Windows = Left when Windows sits to Linux's right.
-4. Move the pointer to that edge to control the other computer. Crossing switches
+3. Move the pointer to that edge to control the other computer. Crossing switches
    immediately, including on KDE Wayland. The pointer enters the other screen
    just inside its joining edge, at the same relative height. Alternatively, press
    **F8** or click **Control the other computer**.
-5. Move to the joining edge on the receiving PC, or press **F8** again, to return
+4. Move to the joining edge on the receiving PC, or press **F8** again, to return
    to local control. F8 on either PC returns both PCs to local control.
-6. Copy and paste normally. Plain text and images synchronize in either
+5. Copy and paste normally. Plain text and images synchronize in either
    direction, even when you are not currently sharing the mouse.
 
 From local mode, either computer's physical keyboard and mouse can control the
