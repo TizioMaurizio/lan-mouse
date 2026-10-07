@@ -17,6 +17,7 @@ class EdgeEndpoint(QObject):
 
 class Edges(QObject):
     hit = Signal()
+    desktop_changed = Signal(bool)
 
     def __init__(self, directory, parent=None):
         super().__init__(parent)
@@ -30,6 +31,7 @@ class Edges(QObject):
         self.kwin = None
         self.endpoint = None
         self.available = True
+        self.closed = False
         self.description = "Move to the selected screen edge, or press F8."
         self.wayland = os.name != "nt" and bool(os.environ.get("WAYLAND_DISPLAY"))
         self.timer = QTimer(self)
@@ -46,7 +48,7 @@ class Edges(QObject):
             self.timer.start()
 
     def _kwin_init(self):
-        from PySide6.QtDBus import QDBusConnection, QDBusInterface
+        from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusServiceWatcher
 
         self.bus = QDBusConnection.sessionBus()
         self.endpoint = EdgeEndpoint(self)
@@ -58,10 +60,40 @@ class Edges(QObject):
             "/Edge", self.endpoint, QDBusConnection.RegisterOption.ExportAllSlots
         )
         self.endpoint.position.connect(self._sample)
+        self.watcher = QDBusServiceWatcher(
+            "org.kde.KWin",
+            self.bus,
+            QDBusServiceWatcher.WatchModeFlag.WatchForOwnerChange,
+            self,
+        )
+        self.watcher.serviceOwnerChanged.connect(self._kwin_owner_changed)
         self.kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", self.bus)
         if not self.kwin.isValid():
             self.available = False
             self.description = "KWin scripting is unavailable; press F8 to switch."
+
+    def _kwin_owner_changed(self, service, old_owner, new_owner):
+        if self.closed:
+            return
+        self.position = self.geometry = None
+        self.at_edge = True
+        self.kwin = None
+        self.available = False
+        # An owner can be replaced directly, without an intermediate empty name.
+        # Restore local input before reconnecting to the new desktop service.
+        self.description = "Linux desktop restarted; restoring local control."
+        self.desktop_changed.emit(False)
+        if new_owner:
+            from PySide6.QtDBus import QDBusInterface
+
+            self.kwin = QDBusInterface(
+                "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", self.bus
+            )
+            self.available = self.kwin.isValid()
+            if self.available:
+                self.description = "Move to the selected screen edge, or press F8."
+                self.configure(self.side, self.enabled)
+                self.desktop_changed.emit(True)
 
     def configure(self, side, enabled):
         self.side, self.enabled = side, enabled
@@ -175,6 +207,7 @@ class Edges(QObject):
         self.at_edge = True
 
     def close(self):
+        self.closed = True
         self.timer.stop()
         if self.kwin:
             self.kwin.call("unloadScript", "lan-mouse-python-edge")

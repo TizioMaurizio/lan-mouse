@@ -55,6 +55,7 @@ def test_clipboard_disabled_does_not_read_or_write(clipboard):
 
 class FakeEdges(QObject):
     hit = Signal()
+    desktop_changed = Signal(bool)
     description = "Move to the selected screen edge, or press F8."
 
     def __init__(self, *args):
@@ -403,3 +404,31 @@ def test_explicit_png_with_url_is_shared_without_native_image(clipboard, qt):
         time.sleep(0.005)
     assert len(changes) == 1
     assert QImage.fromData(changes[0][1]).size() == image.size()
+
+
+def test_desktop_loss_releases_input_and_keeps_automatic_reconnect(window):
+    window.toggle()
+    session = window.session
+    assert window.backend.active
+    window.edges.desktop_changed.emit(False)
+    assert session.closed.is_set()
+    assert window.session is None
+    assert window.owner is None
+    assert not window.backend.active
+    assert not window.backend.receiving
+    assert not window.edges.sending
+    assert not window.network.paused
+    window._connected(FakeSession())
+    window._edge_hit()
+    assert window.backend.active  # A fresh connection must rearm screen switching.
+
+
+def test_network_disconnect_rearms_edges_after_reconnect(window):
+    window.toggle()
+    session = window.session
+    window._closed_thread(session, "lost network")
+    window._disconnected(session, "lost network")
+    assert not window.edges.sending
+    window._connected(FakeSession())
+    window._edge_hit()
+    assert window.backend.active

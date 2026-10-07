@@ -83,7 +83,9 @@ pairings remain valid; you do not need to approve the computers again.
 The app stays running when minimized. Closing its window or choosing **Quit**
 stops sharing. **Disconnect** pauses reconnection on that PC until you click
 Connect again. After an unexpected drop, it reconnects and leaves control local;
-press F8 to resume remote control.
+press F8 to resume remote control. A KDE desktop restart also restores local
+control, reconnects the paired computer, and reloads screen-edge switching.
+The Wayland clipboard watcher reopens its connection automatically.
 
 ## Linux desktop support
 

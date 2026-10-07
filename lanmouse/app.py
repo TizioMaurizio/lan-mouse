@@ -85,6 +85,7 @@ class Window(QMainWindow):
         self.clipboard.warning.connect(self._status)
         self.edges = Edges(self.identity.directory, self)
         self.edges.hit.connect(self._edge_hit)
+        self.edges.desktop_changed.connect(self._desktop_changed)
         self.edge_hint.setText(self.edges.description)
         self.network = Network(
             self.identity,
@@ -426,9 +427,26 @@ class Window(QMainWindow):
         if self.owner != self.identity.id:
             self.toggle(self.edges.crossing())
 
+    def _desktop_changed(self, available):
+        if self.closing:
+            return
+        if not available:
+            self.backend.set_active(False)
+            self.backend.receiving = False
+            self.backend.release_all()
+            if self.session:
+                session = self.session
+                reason = "Linux desktop restarted; reconnecting automatically."
+                session.close(reason)
+                self._disconnected(session, reason)
+        else:
+            self._status("Linux desktop recovered; waiting for the paired computer.")
+        self.edge_hint.setText(self.edges.description)
+
     def _configure_edges(self, *_):
         if not hasattr(self, "edges"):
             return
+        self.edges.sending = self.owner == self.identity.id
         side = self.side.currentText().lower()
         self.identity.settings.update(side=side, edges=self.edge_check.isChecked())
         self.identity.save()

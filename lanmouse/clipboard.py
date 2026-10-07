@@ -37,6 +37,7 @@ class Clipboard(QObject):
         self.dirty.set()
         self.watcher = None
         self.watching = False
+        self.watch_thread = None
         self.encoded.connect(self._qt_encoded)
         self.image_thread = threading.Thread(target=self._image_loop, daemon=True)
         self.image_thread.start()
@@ -46,7 +47,7 @@ class Clipboard(QObject):
         )
         if self.wayland:
             if self.available:
-                threading.Thread(target=self._watch_wayland, daemon=True).start()
+                self._start_watch()
             threading.Thread(target=self._wayland_loop, daemon=True).start()
         else:
             self.clipboard = QGuiApplication.clipboard()
@@ -182,6 +183,8 @@ class Clipboard(QObject):
         # Drain it without storing it; only a one-byte notification reaches Python.
         # The actual MIME is selected by _wayland_read, including mixed offers.
         try:
+            if self.closed.is_set():
+                return
             self.watcher = subprocess.Popen(
                 ["wl-paste", "--watch", "sh", "-c", "cat >/dev/null; printf x"],
                 stdout=subprocess.PIPE,
@@ -199,6 +202,10 @@ class Clipboard(QObject):
                     self.watcher.terminate()
                 self.watcher.wait()
                 self.watcher.stdout.close()
+
+    def _start_watch(self):
+        self.watch_thread = threading.Thread(target=self._watch_wayland, daemon=True)
+        self.watch_thread.start()
 
     @staticmethod
     def _paste(mime):
@@ -243,10 +250,18 @@ class Clipboard(QObject):
     def _wayland_loop(self):
         was_enabled = False
         last_poll = 0
+        last_watch = time.monotonic()
         while not self.closed.wait(0.05):
             if not self.enabled or not self.available:
                 was_enabled = False
                 continue
+            if time.monotonic() - last_watch > 5 and (
+                self.watch_thread is None or not self.watch_thread.is_alive()
+            ):
+                # wl-paste --watch exits when its compositor connection disappears.
+                # Reopen it after a desktop restart; use polling during recovery.
+                last_watch = time.monotonic()
+                self._start_watch()
             try:
                 try:
                     mime, raw = self.incoming.get_nowait()

@@ -6,7 +6,7 @@ Qt: PySide6 6.11.2.
 
 Verified locally:
 
-- **74 tests passed**, with the Windows-only backend module skipped on Linux.
+- **78 tests passed**, with the Windows-only backend module skipped on Linux.
 - Automated Python test suite on Linux, including live loopback TLS connections.
 - GUI starts and renders. Missing `/dev/uinput` permissions produce a setup
   message and leave physical input untouched.
@@ -34,6 +34,9 @@ Verified locally:
   background Qt image compression; stale and duplicate clipboard notifications.
 - Immediate edge crossing/rearming, height-preserving entry, suppression of
   stale border reports, and rapid reverse handoffs are covered by isolated tests.
+- KWin service replacement releases input, reconnects without pausing, clears
+  stale screen geometry, and reloads the edge script. Ordinary disconnects also
+  reset the outgoing edge flag, so the next connection can switch screens.
 
 Not yet verified:
 
