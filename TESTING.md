@@ -6,7 +6,7 @@ Qt: PySide6 6.11.2.
 
 Verified locally:
 
-- **78 tests passed**, with the Windows-only backend module skipped on Linux.
+- **81 tests passed**, with the Windows-only backend module skipped on Linux.
 - Automated Python test suite on Linux, including live loopback TLS connections.
 - GUI starts and renders. Missing `/dev/uinput` permissions produce a setup
   message and leave physical input untouched.
@@ -37,6 +37,9 @@ Verified locally:
 - KWin service replacement releases input, reconnects without pausing, clears
   stale screen geometry, and reloads the edge script. Ordinary disconnects also
   reset the outgoing edge flag, so the next connection can switch screens.
+- LAN discovery selects the matching local subnet over link-local/VPN adapters.
+  Saved endpoints remain available even when mDNS advertises a bad address.
+  A loopback TLS test proves reconnect proceeds after the bad endpoint fails.
 
 Not yet verified:
 

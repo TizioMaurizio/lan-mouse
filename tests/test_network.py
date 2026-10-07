@@ -290,3 +290,69 @@ def test_large_image_survives_chunked_tls_transfer(peers, qt):
     result = b.messages.get(timeout=5)
     assert decode_clipboard(result) == ("image/png", raw)
     assert Clipboard._pixels(QImage.fromData(result["data"])) == Clipboard._pixels(image)
+
+
+def test_discovery_prefers_actual_lan_over_link_local_and_vpn(monkeypatch):
+    from types import SimpleNamespace
+
+    import lanmouse.network as module
+
+    monkeypatch.setattr(
+        module.ifaddr,
+        "get_adapters",
+        lambda: [
+            SimpleNamespace(
+                ips=[
+                    SimpleNamespace(ip="192.168.178.63", network_prefix=24),
+                ]
+            )
+        ],
+    )
+    assert module.rank_addresses(["169.254.251.1", "10.99.0.1", "192.168.178.47"]) == [
+        "192.168.178.47",
+        "10.99.0.1",
+        "169.254.251.1",
+    ]
+
+
+def test_saved_ip_is_retained_when_discovery_has_only_bad_adapter(peers, monkeypatch):
+    import lanmouse.network as module
+
+    a, b = sorted(peers, key=lambda peer: peer.identity.id)
+    monkeypatch.setattr(module, "rank_addresses", lambda addresses: sorted(set(addresses)))
+    discovered = [{"id": b.identity.id, "address": "169.254.251.1", "port": 45831}]
+    known = {b.identity.id: {"address": "192.168.178.47", "port": 45831}}
+    endpoints = a.network._reconnect_candidates(discovered, known)
+    assert {item["address"] for item in endpoints} == {"169.254.251.1", "192.168.178.47"}
+
+
+def test_reconnect_attempts_saved_endpoint_after_bad_discovery(peers, monkeypatch):
+    import lanmouse.network as module
+
+    a, b = sorted(peers, key=lambda peer: peer.identity.id)
+    # Reconnect connects a real TLS peer even when its mDNS advert points elsewhere.
+    a.identity.remember(b.identity.der, "127.0.0.1", b.network.port)
+    b.identity.remember(a.identity.der, "127.0.0.1", a.network.port)
+    a.network.peers["bad-adapter"] = {
+        "id": b.identity.id,
+        "address": "169.254.251.1",
+        "port": 45831,
+    }
+    original = a.network._connect
+    attempts = []
+    monkeypatch.setattr(
+        module,
+        "rank_addresses",
+        lambda addresses: sorted(set(addresses), key=lambda address: address != "169.254.251.1"),
+    )
+
+    def connect(address, port, peer_id, interactive):
+        attempts.append(address)
+        if address != "169.254.251.1":
+            original(address, port, peer_id, interactive)
+
+    monkeypatch.setattr(a.network, "_connect", connect)
+    client = a.ready.get(timeout=7)
+    server = b.ready.get(timeout=7)
+    assert client.peer_id == b.identity.id and server.peer_id == a.identity.id
+    assert attempts[:2] == ["169.254.251.1", "127.0.0.1"]

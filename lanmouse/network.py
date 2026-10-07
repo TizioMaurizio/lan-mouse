@@ -45,7 +45,24 @@ def local_addresses():
         for ip in adapter.ips:
             if isinstance(ip.ip, str) and lan_address(ip.ip) and not ip.ip.startswith("127."):
                 result.add(ip.ip)
-    return sorted(result)
+    return sorted(
+        result, key=lambda address: (ipaddress.ip_address(address).is_link_local, address)
+    )
+
+
+def rank_addresses(addresses):
+    """Prefer reachable local subnets over a peer's VPN/disconnected adapters."""
+    networks = []
+    for adapter in ifaddr.get_adapters():
+        for ip in adapter.ips:
+            if isinstance(ip.ip, str) and lan_address(ip.ip) and not ip.ip.startswith("127."):
+                networks.append(ipaddress.ip_network(f"{ip.ip}/{ip.network_prefix}", strict=False))
+
+    def rank(address):
+        ip = ipaddress.ip_address(address)
+        return (not any(ip in network for network in networks), ip.is_link_local, int(ip))
+
+    return sorted({address for address in addresses if lan_address(address)}, key=rank)
 
 
 class Session:
@@ -327,7 +344,7 @@ class Network:
         peer_id = info.properties.get(b"id", b"").decode(errors="replace")
         if peer_id == self.identity.id or len(peer_id) != 64:
             return
-        addresses = [a for a in info.parsed_addresses() if lan_address(a)]
+        addresses = rank_addresses(info.parsed_addresses())
         if not addresses:
             return
         label = info.properties.get(b"name", b"Computer").decode(errors="replace")[:80]
@@ -337,6 +354,7 @@ class Network:
                 "id": peer_id,
                 "name": label,
                 "address": addresses[0],
+                "addresses": addresses,
                 "port": info.port,
             }
             self.on_peers(list(self.peers.values()))
@@ -385,7 +403,7 @@ class Network:
             except Exception:
                 raw.close()
                 raise
-            sock.settimeout(90)
+            sock.settimeout(90 if interactive else 10)
             der = sock.getpeercert(binary_form=True)
             peer_id = fingerprint(der)
             if expected_id and expected_id != peer_id:
@@ -501,18 +519,32 @@ class Network:
             with self.lock, self.identity.lock:
                 candidates = list(self.peers.values())
                 known = dict(self.identity.settings["peers"])
-            discovered = {p["id"] for p in candidates}
-            for peer_id, peer in known.items():
-                if peer_id not in discovered:
-                    candidates.append(
-                        {"id": peer_id, "address": peer["address"], "port": peer.get("port", PORT)}
-                    )
-            # Only the lower identity initiates automatic reconnect, avoiding double sessions.
-            for candidate in candidates:
-                peer_id = candidate["id"]
-                if peer_id in known and self.identity.id < peer_id:
-                    self.connect(candidate["address"], candidate["port"], peer_id, False)
+            for candidate in self._reconnect_candidates(candidates, known):
+                if self.session or self.paused or self.stopped.is_set():
                     break
+                # Try each endpoint in turn; a failed discovery address must not
+                # hide the last successful IP or starve the remaining adapters.
+                self._connect(candidate["address"], candidate["port"], candidate["id"], False)
+
+    def _reconnect_candidates(self, discovered, known):
+        result = []
+        for peer_id, saved in known.items():
+            # Only the lower identity initiates, avoiding double sessions.
+            if self.identity.id >= peer_id:
+                continue
+            endpoints = {(saved["address"], saved.get("port", PORT))}
+            for peer in discovered:
+                if peer["id"] == peer_id:
+                    endpoints.update(
+                        (address, peer["port"])
+                        for address in peer.get("addresses", [peer["address"]])
+                    )
+            order = rank_addresses(address for address, port in endpoints)
+            for address, port in sorted(
+                endpoints, key=lambda endpoint: (order.index(endpoint[0]), endpoint[1])
+            ):
+                result.append({"id": peer_id, "address": address, "port": port})
+        return result
 
     def disconnect(self):
         self.paused = True

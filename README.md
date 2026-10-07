@@ -66,7 +66,9 @@ relative mouse on Linux, such as a USB/Bluetooth mouse.
 If discovery does not find the other PC, enter its IPv4 address in **Connect by
 IP**. Each app displays its own IP at the top. This needs no router port forwarding.
 The computer that initiates a connection supplies the initial clipboard content;
-later copies on either computer update both clipboards.
+later copies on either computer update both clipboards. Discovery prefers an
+address on your current LAN over disconnected/VPN adapters. Automatic reconnect
+also tries the saved working IP if an advertised address fails.
 
 Image compression runs in the background. Clipboard transfers use small chunks
 interleaved with mouse/keyboard input; they do not occupy the connection as one
