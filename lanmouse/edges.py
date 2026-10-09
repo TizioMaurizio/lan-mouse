@@ -134,10 +134,10 @@ class Edges(QObject):
         self.health_timer.start()
 
     def _load_kwin_script(self):
-        from PySide6.QtDBus import QDBusMessage
-
         if self.closed or not self.enabled or not self.kwin or not self.available:
             return
+        from PySide6.QtDBus import QDBusMessage
+
         loaded = self.kwin.call("isScriptLoaded", "lan-mouse-python-edge")
         if loaded.arguments() == [True]:
             self.reload_timer.start(100)
