@@ -1,6 +1,7 @@
 """Screen edge switching: native KWin script on KDE, cursor polling on X11/Windows."""
 
 import os
+import time
 
 from PySide6.QtCore import ClassInfo, QObject, QRect, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCursor, QGuiApplication
@@ -13,6 +14,10 @@ class EdgeEndpoint(QObject):
     @Slot(int, int, int, int, int, int)
     def moved(self, x, y, left, top, width, height):
         self.position.emit(x, y, left, top, width, height)
+
+    @Slot(result="QVariantMap")
+    def status(self):
+        return self.parent().diagnostics()
 
 
 class Edges(QObject):
@@ -32,6 +37,14 @@ class Edges(QObject):
         self.endpoint = None
         self.available = True
         self.closed = False
+        self.script_id = None
+        self.last_report = 0
+        self.reload_timer = QTimer(self)
+        self.reload_timer.setSingleShot(True)
+        self.reload_timer.timeout.connect(self._load_kwin_script)
+        self.health_timer = QTimer(self)
+        self.health_timer.setInterval(500)
+        self.health_timer.timeout.connect(self._check_kwin_script)
         self.description = "Move to the selected screen edge, or press F8."
         self.wayland = os.name != "nt" and bool(os.environ.get("WAYLAND_DISPLAY"))
         self.timer = QTimer(self)
@@ -75,6 +88,10 @@ class Edges(QObject):
     def _kwin_owner_changed(self, service, old_owner, new_owner):
         if self.closed:
             return
+        self.reload_timer.stop()
+        self.health_timer.stop()
+        self.script_id = None
+        self.last_report = 0
         self.position = self.geometry = None
         self.at_edge = True
         self.kwin = None
@@ -99,44 +116,97 @@ class Edges(QObject):
         self.side, self.enabled = side, enabled
         self.at_edge = True
         if self.kwin and self.available:
-            self.kwin.call("unloadScript", "lan-mouse-python-edge")
-            if enabled:
-                path = self.directory / "edge.js"
-                path.write_text(
-                    "var last = 0;\n"
-                    "function report() {\n"
-                    "  var p = workspace.cursorPos;\n"
-                    "  var g = workspace.virtualScreenGeometry;\n"
-                    "  var now = Date.now();\n"
-                    "  var edge = p.x <= g.x + 16 || p.x >= g.x + g.width - 17;\n"
-                    "  if (!edge && now - last < 4) return;\n"
-                    "  last = now;\n"
-                    '  callDBus("org.lanmouse.Edge", "/Edge", "org.lanmouse.Edge", "moved",\n'
-                    "    Math.round(p.x), Math.round(p.y), g.x, g.y, g.width, g.height);\n"
-                    "}\n"
-                    "workspace.cursorPosChanged.connect(report);\n"
-                    "report();\n"
-                )
-                reply = self.kwin.call("loadScript", str(path), "lan-mouse-python-edge")
-                from PySide6.QtDBus import QDBusInterface, QDBusMessage
+            if not enabled:
+                self.reload_timer.stop()
+                self.health_timer.stop()
+                self.script_id = None
+                self.kwin.call("unloadScript", "lan-mouse-python-edge")
+            elif self.script_id is None and not self.reload_timer.isActive():
+                self._reload_kwin_script()
 
-                if reply.type() == QDBusMessage.MessageType.ErrorMessage:
-                    self.available = False
-                    self.description = "KWin could not load the edge script; press F8 to switch."
-                    return
-                script_id = reply.arguments()[0]
-                script = QDBusInterface(
-                    "org.kde.KWin", f"/Scripting/Script{script_id}", "org.kde.kwin.Script", self.bus
-                )
-                # Plasma 6 exports scripts under /Scripting/ScriptN.
-                if not script.isValid():
-                    script = QDBusInterface(
-                        "org.kde.KWin", f"/{script_id}", "org.kde.kwin.Script", self.bus
-                    )
-                result = script.call("run")
-                if result.type() == QDBusMessage.MessageType.ErrorMessage:
-                    self.available = False
-                    self.description = "KWin could not start edge switching; press F8 to switch."
+    def _reload_kwin_script(self):
+        self.script_id = None
+        self.last_report = time.monotonic()
+        self.kwin.call("unloadScript", "lan-mouse-python-edge")
+        # KWin deletes scripts asynchronously. Loading immediately can return -1
+        # or leave an old script at the D-Bus path we are about to start.
+        self.reload_timer.start(100)
+        self.health_timer.start()
+
+    def _load_kwin_script(self):
+        from PySide6.QtDBus import QDBusMessage
+
+        if self.closed or not self.enabled or not self.kwin or not self.available:
+            return
+        loaded = self.kwin.call("isScriptLoaded", "lan-mouse-python-edge")
+        if loaded.arguments() == [True]:
+            self.reload_timer.start(100)
+            return
+        path = self.directory / "edge.js"
+        path.write_text(
+            "var last = 0;\n"
+            "function report(force) {\n"
+            "  var p = workspace.cursorPos;\n"
+            "  var g = workspace.virtualScreenGeometry;\n"
+            "  var now = Date.now();\n"
+            "  var edge = p.x <= g.x + 16 || p.x >= g.x + g.width - 17;\n"
+            "  if (!force && !edge && now >= last && now - last < 4) return;\n"
+            "  last = now;\n"
+            '  callDBus("org.lanmouse.Edge", "/Edge", "org.lanmouse.Edge", "moved",\n'
+            "    p.x, p.y, g.x, g.y, g.width, g.height);\n"
+            "}\n"
+            "workspace.cursorPosChanged.connect(function() { report(false); });\n"
+            "workspace.screensChanged.connect(function() { report(true); });\n"
+            "var heartbeat = new QTimer();\n"
+            "heartbeat.interval = 1000;\n"
+            "heartbeat.timeout.connect(function() { report(true); });\n"
+            "heartbeat.start();\n"
+            "report(true);\n"
+        )
+        reply = self.kwin.call("loadScript", str(path), "lan-mouse-python-edge")
+        arguments = reply.arguments()
+        if (
+            reply.type() == QDBusMessage.MessageType.ErrorMessage
+            or not arguments
+            or type(arguments[0]) is not int
+            or arguments[0] < 0
+        ):
+            self.reload_timer.start(500)
+            return
+        # KWin allocates IDs from the current script count, so a reused ID's
+        # D-Bus path can belong to a different plugin. Start through the manager,
+        # which addresses the actual loaded objects and skips running scripts.
+        result = self.kwin.call("start")
+        if result.type() == QDBusMessage.MessageType.ErrorMessage:
+            self._reload_kwin_script()
+            return
+        self.script_id = arguments[0]
+        self.last_report = time.monotonic()
+
+    def _check_kwin_script(self):
+        if (
+            not self.closed
+            and self.enabled
+            and self.kwin
+            and self.available
+            and time.monotonic() - self.last_report > 3
+        ):
+            self._reload_kwin_script()
+
+    def diagnostics(self):
+        return {
+            "enabled": self.enabled,
+            "available": self.available,
+            "sending": self.sending,
+            "side": self.side,
+            "armed": not self.at_edge,
+            "script_id": self.script_id if self.script_id is not None else -1,
+            "report_age_ms": round((time.monotonic() - self.last_report) * 1000)
+            if self.last_report
+            else -1,
+            "cursor_x": self.position[0] if self.position else -1,
+            "cursor_y": self.position[1] if self.position else -1,
+        }
 
     def _poll(self):
         if not self.enabled:
@@ -158,6 +228,7 @@ class Edges(QObject):
         )
 
     def _sample(self, x, y, left, top, width, height):
+        self.last_report = time.monotonic()
         self.position = (x, y)
         self.geometry = QRect(left, top, width, height)
         distance = x - left if self.side == "left" else left + width - 1 - x
@@ -208,6 +279,8 @@ class Edges(QObject):
 
     def close(self):
         self.closed = True
+        self.reload_timer.stop()
+        self.health_timer.stop()
         self.timer.stop()
         if self.kwin:
             self.kwin.call("unloadScript", "lan-mouse-python-edge")

@@ -6,7 +6,7 @@ Qt: PySide6 6.11.2.
 
 Verified locally:
 
-- **84 tests passed**, with the Windows-only backend module skipped on Linux.
+- **90 tests passed**, with the Windows-only backend module skipped on Linux.
 - Automated Python test suite on Linux, including live loopback TLS connections.
 - GUI starts and renders. Missing `/dev/uinput` permissions produce a setup
   message and leave physical input untouched.
@@ -72,3 +72,20 @@ Not yet verified:
 
 Use ordinary desktop apps for the first check. Windows elevation and secure
 desktop behavior are documented limitations.
+
+## KDE edge regression check - 9 October 2026
+
+KWin 6.7.5 on the actual laptop, with the external monitor at x=0 and the
+laptop at x=1920 in a 3840 x 1080 desktop:
+
+- Reproduced a loaded but inactive edge bridge. KWin's reused script ID pointed
+  its D-Bus run method at a different plugin; a fresh uniquely addressed copy
+  reported cursor positions successfully.
+- Starting through KWin's scripting manager activates the actual loaded object.
+  Reload waits for asynchronous deletion before loading the replacement.
+- Native pointer movement across the laptop's right border produced exactly
+  one edge hit at x=3839. No physical keyboard or mouse was grabbed in the test.
+- Deliberately unloading the script recovered automatically within five seconds,
+  with fresh cursor/heartbeat reports afterward.
+- Regression tests cover deferred deletion, healthy reconfiguration, stalled
+  scripts, and cancellation of recovery when switching is disabled or closed.

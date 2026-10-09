@@ -96,3 +96,85 @@ def test_kwin_loss_does_not_call_a_dead_interface(edges):
     assert notices == [False]
     assert not edges.available
     assert edges.kwin is None
+
+
+class Reply:
+    def __init__(self, *arguments):
+        self.values = list(arguments)
+
+    def arguments(self):
+        return self.values
+
+    def type(self):
+        from PySide6.QtDBus import QDBusMessage
+
+        return QDBusMessage.MessageType.ReplyMessage
+
+
+class KWinStub:
+    def __init__(self):
+        self.calls = []
+        self.pending_deletion = 0
+
+    def call(self, method, *args):
+        self.calls.append((method, *args))
+        if method == "isScriptLoaded":
+            if self.pending_deletion:
+                self.pending_deletion -= 1
+                return Reply(True)
+            return Reply(False)
+        if method == "loadScript":
+            return Reply(7)
+        return Reply()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="KWin D-Bus adapter is Linux-only")
+def test_reload_waits_for_deferred_script_deletion(edges):
+    kwin = KWinStub()
+    kwin.pending_deletion = 2
+    edges.kwin = kwin
+    edges.bus = object()
+    edges.configure("right", True)
+    assert not any(call[0] == "loadScript" for call in kwin.calls)
+    edges._load_kwin_script()
+    edges._load_kwin_script()
+    assert not any(call[0] == "loadScript" for call in kwin.calls)
+    edges._load_kwin_script()
+    assert edges.script_id == 7
+    assert kwin.calls[-1] == ("start",)
+
+
+def test_live_cursor_reports_prevent_unnecessary_reload(edges):
+    edges.kwin = KWinStub()
+    edges.script_id = 7
+    edges._sample(500, 200, 0, 0, 1000, 800)
+    edges._check_kwin_script()
+    edges.configure("left", True)
+    assert edges.kwin.calls == []
+    assert edges.script_id == 7
+
+
+def test_stalled_loaded_script_is_restarted_without_disconnect(edges):
+    import time
+
+    edges.kwin = KWinStub()
+    edges.script_id = 7
+    edges.last_report = time.monotonic() - 4
+    edges._check_kwin_script()
+    assert edges.script_id is None
+    assert edges.reload_timer.isActive()
+    assert edges.kwin.calls == [("unloadScript", "lan-mouse-python-edge")]
+    assert edges.enabled  # Recovery must not disable sharing or require F8.
+
+
+def test_disabling_or_closing_cancels_pending_script_restart(edges):
+    edges.kwin = KWinStub()
+    edges._reload_kwin_script()
+    edges.configure("right", False)
+    assert not edges.reload_timer.isActive()
+    assert not edges.health_timer.isActive()
+    edges._load_kwin_script()
+    assert not any(call[0] == "loadScript" for call in edges.kwin.calls)
+    edges.close()
+    edges._check_kwin_script()
+    assert not edges.reload_timer.isActive()

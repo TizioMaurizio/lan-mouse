@@ -105,7 +105,10 @@ The Wayland clipboard watcher reopens its connection automatically.
 The KWin script is loaded only while connected with screen switching enabled,
 and unloaded when disconnected or closed. It is not installed as a permanent
 KWin extension. It observes cursor movement directly, without KDE's screen-edge
-activation delay. Joining edges rearm as soon as the pointer moves inward, so
+activation delay. A heartbeat checks the KDE bridge even while the mouse is
+stationary, and automatically restarts a stalled script. Startup uses the KWin
+scripting manager to avoid reused script IDs after desktop/plugin changes.
+Joining edges rearm as soon as the pointer moves inward, so
 you can cross back immediately. KDE Wayland uses a virtual absolute pointer
 for precise placement without mouse acceleration.
 
