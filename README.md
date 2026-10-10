@@ -79,7 +79,8 @@ second while preserving key, click, scroll and handoff ordering.
 
 ## Updating an existing installation
 
-Close LAN Mouse, run `git pull` in this folder on **both PCs**, then run
+Choose **Quit** from LAN Mouse's tray menu, run `git pull` in this folder on
+**both PCs**, then run
 `start.sh` on Linux or `start.cmd` on Windows again. Version 0.2 changes the wire
 protocol to support clipboard chunks, so both PCs must be updated. Saved
 pairings remain valid; you do not need to approve the computers again.
@@ -88,8 +89,10 @@ The app starts in the system tray and keeps sharing in the background.
 Click its mouse-and-arrows icon or choose **Show LAN Mouse** to open settings.
 Both the minimize button and closing its window hide settings back in the tray
 and keep sharing connected. On KDE Wayland and Windows, the settings window
-also stays out of the normal taskbar and Alt-Tab list. Choose **Quit** in the tray menu to stop sharing.
-On desktops without a system tray, closing minimizes the window to the taskbar. **Disconnect** pauses reconnection on that PC until you click
+also stays out of the normal taskbar and Alt-Tab list. Choose **Quit** in the
+tray menu to stop sharing.
+On desktops without a system tray, closing minimizes the window to the taskbar.
+**Disconnect** pauses reconnection on that PC until you click
 Connect again. After an unexpected drop, it reconnects and leaves control local;
 press F8 to resume remote control. A KDE desktop restart also restores local
 control, reconnects the paired computer, and reloads screen-edge switching.
