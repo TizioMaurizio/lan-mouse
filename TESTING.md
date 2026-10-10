@@ -6,7 +6,7 @@ Qt: PySide6 6.11.2.
 
 Verified locally:
 
-- **90 tests passed**, with the Windows-only backend module skipped on Linux.
+- **98 tests passed**, with the Windows-only backend module skipped on Linux.
 - Automated Python test suite on Linux, including live loopback TLS connections.
 - GUI starts and renders. Missing `/dev/uinput` permissions produce a setup
   message and leave physical input untouched.
@@ -89,3 +89,15 @@ laptop at x=1920 in a 3840 x 1080 desktop:
   with fresh cursor/heartbeat reports afterward.
 - Regression tests cover deferred deletion, healthy reconfiguration, stalled
   scripts, and cancellation of recovery when switching is disabled or closed.
+
+## Tray and icon check - 10 October 2026
+
+- On the real KDE Wayland desktop, KWin reports skipTaskbar=true and
+  skipSwitcher=true for the LAN Mouse settings window, including while open.
+- Native minimization hides the window while its tray icon remains available.
+- Startup stays in the tray; restoring cancels a pending minimize operation.
+  Closing, minimizing and restoring preserve the connection and input timer.
+- The KDE rule matches the exact LAN Mouse application ID, preserves other
+  application rules, and removes its forced hiding when no tray is available.
+- The shared SVG icon renders at 16, 22, 32 and 64 pixels with transparent
+  corners and visible mouse artwork. It is included in package data.

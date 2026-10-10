@@ -475,3 +475,70 @@ def test_explicit_quit_stops_sharing_and_releases_input(window):
     assert not window.timer.isActive()
     assert window.clipboard.closed.is_set()
     assert window.network.stopped.is_set()
+
+
+def test_minimize_hides_to_tray_and_keeps_connection(window, qt, monkeypatch):
+    from types import SimpleNamespace
+
+    import lanmouse.app as module
+
+    window.tray = SimpleNamespace(isVisible=lambda: True, hide=lambda: None)
+    monkeypatch.setattr(module.QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+    window.show()
+    window.toggle()
+    session = window.session
+    window.showMinimized()
+    qt.processEvents()
+    assert not window.isVisible()
+    assert not window.isMinimized()
+    assert not session.closed.is_set()
+    assert window.backend.active
+    assert window.timer.isActive()
+    window.show_window()
+    assert window.isVisible() and not window.isMinimized()
+
+
+def test_startup_stays_in_tray(window, monkeypatch):
+    from types import SimpleNamespace
+
+    import lanmouse.app as module
+
+    window.tray = SimpleNamespace(isVisible=lambda: True, hide=lambda: None)
+    monkeypatch.setattr(module.QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+    window.present_at_startup()
+    assert not window.isVisible()
+    assert window.timer.isActive()
+    assert not window.session.closed.is_set()
+
+
+def test_startup_without_tray_keeps_settings_accessible(window, monkeypatch):
+    import lanmouse.app as module
+
+    monkeypatch.setattr(module.QSystemTrayIcon, "isSystemTrayAvailable", lambda: False)
+    window.present_at_startup()
+    assert window.isVisible()
+
+
+def test_restore_cancels_pending_minimize(window, qt, monkeypatch):
+    from types import SimpleNamespace
+
+    import lanmouse.app as module
+
+    window.tray = SimpleNamespace(isVisible=lambda: True, hide=lambda: None)
+    monkeypatch.setattr(module.QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+    window.showMinimized()
+    window.show_window()
+    qt.processEvents()
+    assert window.isVisible() and not window.isMinimized()
+
+
+def test_shared_icon_has_transparent_background_and_visible_artwork(qt):
+    from lanmouse.icons import application_icon
+
+    icon = application_icon()
+    assert not icon.isNull()
+    for size in (16, 22, 32, 64):
+        picture = icon.pixmap(size, size).toImage()
+        assert not picture.isNull()
+        assert picture.pixelColor(0, 0).alpha() == 0
+        assert picture.pixelColor(picture.width() // 2, picture.height() // 4).alpha() > 0

@@ -6,8 +6,8 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QPixmap
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,7 +28,9 @@ from PySide6.QtWidgets import (
 
 from .clipboard import Clipboard
 from .core import PORT, Clock, ProtocolError, decode_clipboard, integer, validate_input
+from .desktop import APP_ID, configure_kde_taskbar
 from .edges import Edges
+from .icons import application_icon
 from .identity import Identity
 from .network import Network, local_addresses
 
@@ -56,8 +58,13 @@ class Window(QMainWindow):
         self.pending_approvals = []
         self.closing = False
         self.quit_requested = False
+        self.hiding_to_tray = False
+        self.minimize_timer = QTimer(self)
+        self.minimize_timer.setSingleShot(True)
+        self.minimize_timer.timeout.connect(self._finish_minimize)
         self.events = Signals()
         self.setWindowTitle("LAN Mouse")
+        self.setWindowIcon(application_icon())
         self.resize(580, 710)
         self._build_ui()
         self.events.status.connect(self._status)
@@ -201,11 +208,15 @@ class Window(QMainWindow):
 
     def _tray(self):
         self.tray = None
-        if not QSystemTrayIcon.isSystemTrayAvailable():
+        has_tray = QSystemTrayIcon.isSystemTrayAvailable()
+        configure_kde_taskbar(has_tray)
+        if not has_tray:
             return
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.GlobalColor.darkCyan)
-        self.tray = QSystemTrayIcon(QIcon(pixmap), self)
+        # A utility window stays out of the normal taskbar/Alt-Tab list. The
+        # tray icon remains the way to reopen settings while sharing continues.
+        self.setWindowFlag(Qt.WindowType.Tool, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.tray = QSystemTrayIcon(application_icon(), self)
         menu = QMenu(self)
         show = QAction("Show LAN Mouse", self)
         show.triggered.connect(self.show_window)
@@ -231,7 +242,41 @@ class Window(QMainWindow):
         )
         self.tray.show()
 
+    def tray_available(self):
+        return bool(self.tray and self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable())
+
+    def hide_to_tray(self):
+        self.minimize_timer.stop()
+        self.hiding_to_tray = True
+        try:
+            self.hide()
+            # Clear the minimized state while hidden, so the next tray click
+            # restores a normal settings window instead of a taskbar item.
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        finally:
+            self.hiding_to_tray = False
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+            and not self.hiding_to_tray
+            and self.tray_available()
+        ):
+            # showMinimized() can still call show() after this event returns.
+            self.minimize_timer.start(0)
+
+    def _finish_minimize(self):
+        if not self.closing and self.isMinimized() and self.tray_available():
+            self.hide_to_tray()
+
+    def present_at_startup(self):
+        if not self.tray_available():
+            self.show_window()
+
     def show_window(self):
+        self.minimize_timer.stop()
         self.showNormal()
         self.raise_()
         self.activateWindow()
@@ -490,8 +535,8 @@ class Window(QMainWindow):
     def closeEvent(self, event):
         if not self.quit_requested:
             event.ignore()
-            if self.tray and self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable():
-                self.hide()
+            if self.tray_available():
+                self.hide_to_tray()
             else:
                 # Keep an accessible taskbar window when a desktop has no tray.
                 self.showMinimized()
@@ -500,6 +545,7 @@ class Window(QMainWindow):
             event.accept()
             return
         self.closing = True
+        self.minimize_timer.stop()
         for request in self.pending_approvals:
             request["done"].set()
         self.timer.stop()
@@ -523,11 +569,13 @@ def main():
             pass
     application = QApplication(sys.argv)
     application.setApplicationName("LAN Mouse")
+    application.setDesktopFileName(APP_ID)
+    application.setWindowIcon(application_icon())
     application.setQuitOnLastWindowClosed(False)
     try:
         window = Window()
     except Exception as exc:
         QMessageBox.critical(None, "LAN Mouse", f"Could not start LAN Mouse:\n{exc}")
         raise SystemExit(1) from exc
-    window.show()
+    window.present_at_startup()
     raise SystemExit(application.exec())

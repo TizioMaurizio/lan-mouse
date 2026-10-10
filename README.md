@@ -84,9 +84,11 @@ Close LAN Mouse, run `git pull` in this folder on **both PCs**, then run
 protocol to support clipboard chunks, so both PCs must be updated. Saved
 pairings remain valid; you do not need to approve the computers again.
 
-The app stays running when minimized. Closing its window hides it in the
-system tray and keeps sharing connected. Click the tray icon or choose
-**Show LAN Mouse** to reopen it; choose **Quit** in the tray menu to stop sharing.
+The app starts in the system tray and keeps sharing in the background.
+Click its mouse-and-arrows icon or choose **Show LAN Mouse** to open settings.
+Both the minimize button and closing its window hide settings back in the tray
+and keep sharing connected. On KDE Wayland and Windows, the settings window
+also stays out of the normal taskbar and Alt-Tab list. Choose **Quit** in the tray menu to stop sharing.
 On desktops without a system tray, closing minimizes the window to the taskbar. **Disconnect** pauses reconnection on that PC until you click
 Connect again. After an unexpected drop, it reconnects and leaves control local;
 press F8 to resume remote control. A KDE desktop restart also restores local

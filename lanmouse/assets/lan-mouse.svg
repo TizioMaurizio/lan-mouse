@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>LAN Mouse</title>
+  <rect x="21" y="5" width="22" height="32" rx="11" fill="#f2f8fb" stroke="#164b59" stroke-width="3"/>
+  <path d="M32 6v17M22 23h20" fill="none" stroke="#164b59" stroke-width="2.5"/>
+  <rect x="30" y="10" width="4" height="8" rx="2" fill="#159d83"/>
+  <path d="M10 50h44M17 43l-7 7 7 7M47 43l7 7-7 7" fill="none" stroke="#159d83" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
